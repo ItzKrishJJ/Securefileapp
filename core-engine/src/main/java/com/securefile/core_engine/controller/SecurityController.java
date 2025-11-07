@@ -13,60 +13,70 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
 import java.util.List;
-import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/security")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "http://localhost:3000")  // allow frontend
+@CrossOrigin(origins = "http://localhost:3000")
 public class SecurityController {
 
     private final CryptoService cryptoService;
     private final ObjectMapper mapper = new ObjectMapper();
 
     /**
-     * Encrypt endpoint: receives one file + optional policy JSON.
+     * ✅ Encrypt Multiple Files
      */
     @PostMapping(value = "/encrypt", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<InputStreamResource> encryptFile(
-            @RequestPart("files") MultipartFile file, // ✅ changed name to match frontend
+    public ResponseEntity<InputStreamResource> encryptFiles(
+            @RequestPart("files") List<MultipartFile> files,
             @RequestPart(value = "policy", required = false) String policyJson
     ) throws Exception {
 
-        // 1. Zip single file into a byte array
-        byte[] zipped = ZipUtils.zipSingleFile(file);
+        if (files == null || files.isEmpty()) {
+            return ResponseEntity.badRequest().build();
+        }
 
-        // 2. Parse policy (if present)
+        // ✅ Zip all uploaded files
+        byte[] zipped = ZipUtils.zipFiles(files);
+
         Policy policy = null;
         if (policyJson != null && !policyJson.isBlank()) {
             policy = mapper.readValue(policyJson, Policy.class);
         }
 
-        // 3. Encrypt file
-        HybridContainer container = cryptoService.hybridEncrypt(zipped,
-                List.of(file.getOriginalFilename()), policy);
+        List<String> fileNames = files.stream()
+                .map(MultipartFile::getOriginalFilename)
+                .toList();
 
-        // 4. Serialize container and send as response
+        HybridContainer container = cryptoService.hybridEncrypt(zipped, fileNames, policy);
+
         byte[] out = cryptoService.serializeContainer(container);
         InputStreamResource resource = new InputStreamResource(new ByteArrayInputStream(out));
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentDisposition(ContentDisposition.attachment()
-                .filename(file.getOriginalFilename() + ".sfa").build());
+                .filename("securebundle.sfa").build());
         headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
 
         return new ResponseEntity<>(resource, headers, HttpStatus.OK);
     }
 
+    /**
+     * ✅ Decrypt .sfa → returns original ZIP
+     */
     @PostMapping(value = "/decrypt", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<InputStreamResource> decryptFile(@RequestPart("file") MultipartFile containerFile) throws Exception {
+    public ResponseEntity<InputStreamResource> decryptFile(
+            @RequestPart("file") MultipartFile containerFile
+    ) throws Exception {
+
         byte[] bytes = containerFile.getBytes();
         HybridContainer container = cryptoService.deserializeContainer(bytes);
         byte[] zipBytes = cryptoService.hybridDecrypt(container);
 
         InputStreamResource resource = new InputStreamResource(new ByteArrayInputStream(zipBytes));
         HttpHeaders headers = new HttpHeaders();
-        headers.setContentDisposition(ContentDisposition.attachment().filename("decrypted.zip").build());
+        headers.setContentDisposition(ContentDisposition.attachment()
+                .filename("decrypted.zip").build());
         headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
 
         return new ResponseEntity<>(resource, headers, HttpStatus.OK);
