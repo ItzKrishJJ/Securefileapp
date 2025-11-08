@@ -7,7 +7,7 @@ import com.securefile.core_engine.util.KeystoreHelper;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.springframework.stereotype.Service;
 
-import jakarta.annotation.PostConstruct;                       // ✅ jakarta, not javax
+import jakarta.annotation.PostConstruct;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -20,7 +20,6 @@ import java.security.Signature;
 import java.security.spec.MGF1ParameterSpec;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
-// ✅ correct JDK imports
 import java.util.Base64;
 import java.util.List;
 
@@ -45,34 +44,30 @@ public class CryptoService {
     @PostConstruct
     public void init() throws Exception {
         Security.addProvider(new BouncyCastleProvider());
-        rsaKeyPair = keystoreHelper.loadKeyPair();             // ✅ will work once helper is defined
+        rsaKeyPair = keystoreHelper.loadKeyPair();
         System.out.println("✅ RSA KeyPair loaded from keystore.");
     }
 
     // -------------------- HYBRID ENCRYPT --------------------
-    public HybridContainer hybridEncrypt(byte[] plaintext, List<String> fileNames, Policy policy) throws Exception {
-        // 1. Generate AES key
+    public HybridContainer hybridEncrypt(byte[] plaintext, List<String> fileNames, Policy policy, String token) throws Exception {
         KeyGenerator kg = KeyGenerator.getInstance(AES_ALGO);
         kg.init(AES_KEY_BITS);
         SecretKey aesKey = kg.generateKey();
 
-        // 2. AES-GCM encrypt
         byte[] iv = new byte[GCM_IV_BYTES];
         SecureRandom sr = new SecureRandom();
         sr.nextBytes(iv);
+
         Cipher aesCipher = Cipher.getInstance(AES_TRANSFORMATION);
-        GCMParameterSpec gcmSpec = new GCMParameterSpec(GCM_TAG_BITS, iv);
-        aesCipher.init(Cipher.ENCRYPT_MODE, aesKey, gcmSpec);
+        aesCipher.init(Cipher.ENCRYPT_MODE, aesKey, new GCMParameterSpec(GCM_TAG_BITS, iv));
         byte[] cipherText = aesCipher.doFinal(plaintext);
 
-        // 3. RSA-OAEP wrap AES key
         Cipher rsaCipher = Cipher.getInstance(RSA_TRANSFORMATION);
         OAEPParameterSpec oaepParams = new OAEPParameterSpec(
                 "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT);
         rsaCipher.init(Cipher.ENCRYPT_MODE, rsaKeyPair.getPublic(), oaepParams);
         byte[] wrappedKey = rsaCipher.doFinal(aesKey.getEncoded());
 
-        // 4. Optional signature
         String signatureB64 = null;
         if (policy == null || policy.isRequireSignature()) {
             signatureB64 = sign(cipherText);
@@ -85,11 +80,17 @@ public class CryptoService {
         container.setSignature(signatureB64);
         container.setFileNames(fileNames);
         container.setMetadata(policy == null ? null : mapper.writeValueAsString(policy));
+        container.setToken(token); // ✅ Attach token for verification
+
         return container;
     }
 
     // -------------------- HYBRID DECRYPT --------------------
-    public byte[] hybridDecrypt(HybridContainer container) throws Exception {
+    public byte[] hybridDecrypt(HybridContainer container, String providedToken) throws Exception {
+        if (container.getToken() == null || !container.getToken().equals(providedToken)) {
+            throw new SecurityException("❌ Invalid decryption token!");
+        }
+
         byte[] wrappedKey = Base64.getDecoder().decode(container.getEncryptedKey());
         byte[] iv = Base64.getDecoder().decode(container.getIv());
         byte[] cipherText = Base64.getDecoder().decode(container.getCipherText());

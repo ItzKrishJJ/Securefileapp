@@ -12,6 +12,8 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.List;
 
 @RestController
@@ -23,11 +25,18 @@ public class SecurityController {
     private final CryptoService cryptoService;
     private final ObjectMapper mapper = new ObjectMapper();
 
+    // ✅ Generate random token for encryption
+    private String generateToken() {
+        byte[] tokenBytes = new byte[16];
+        new SecureRandom().nextBytes(tokenBytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes);
+    }
+
     /**
-     * ✅ Encrypt Multiple Files
+     * ✅ Encrypt Multiple Files with token
      */
     @PostMapping(value = "/encrypt", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<InputStreamResource> encryptFiles(
+    public ResponseEntity<?> encryptFiles(
             @RequestPart("files") List<MultipartFile> files,
             @RequestPart(value = "policy", required = false) String policyJson
     ) throws Exception {
@@ -36,9 +45,7 @@ public class SecurityController {
             return ResponseEntity.badRequest().build();
         }
 
-        // ✅ Zip all uploaded files
         byte[] zipped = ZipUtils.zipFiles(files);
-
         Policy policy = null;
         if (policyJson != null && !policyJson.isBlank()) {
             policy = mapper.readValue(policyJson, Policy.class);
@@ -48,7 +55,9 @@ public class SecurityController {
                 .map(MultipartFile::getOriginalFilename)
                 .toList();
 
-        HybridContainer container = cryptoService.hybridEncrypt(zipped, fileNames, policy);
+        String encryptionToken = generateToken();
+
+        HybridContainer container = cryptoService.hybridEncrypt(zipped, fileNames, policy, encryptionToken);
 
         byte[] out = cryptoService.serializeContainer(container);
         InputStreamResource resource = new InputStreamResource(new ByteArrayInputStream(out));
@@ -57,23 +66,31 @@ public class SecurityController {
         headers.setContentDisposition(ContentDisposition.attachment()
                 .filename("securebundle.sfa").build());
         headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
+        headers.add("X-Encryption-Token", encryptionToken); // ✅ Include token in response header
 
         return new ResponseEntity<>(resource, headers, HttpStatus.OK);
     }
 
     /**
-     * ✅ Decrypt .sfa → returns original ZIP
+     * ✅ Decrypt file with token validation
      */
     @PostMapping(value = "/decrypt", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<InputStreamResource> decryptFile(
-            @RequestPart("file") MultipartFile containerFile
+    public ResponseEntity<?> decryptFile(
+            @RequestPart("file") MultipartFile containerFile,
+            @RequestPart("token") String token
     ) throws Exception {
 
         byte[] bytes = containerFile.getBytes();
         HybridContainer container = cryptoService.deserializeContainer(bytes);
-        byte[] zipBytes = cryptoService.hybridDecrypt(container);
 
+        if (!cryptoService.verifyToken(container, token)) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body("Invalid or missing encryption token.");
+        }
+
+        byte[] zipBytes = cryptoService.hybridDecrypt(container);
         InputStreamResource resource = new InputStreamResource(new ByteArrayInputStream(zipBytes));
+
         HttpHeaders headers = new HttpHeaders();
         headers.setContentDisposition(ContentDisposition.attachment()
                 .filename("decrypted.zip").build());
