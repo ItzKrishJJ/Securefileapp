@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
 		 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 		 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
@@ -6,11 +7,10 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<parent>
-		<!-- ✅ Core Spring Boot parent handles all version management -->
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
 		<version>3.1.6</version>
-		<relativePath/> <!-- lookup parent from repository -->
+		<relativePath />
 	</parent>
 
 	<groupId>com.securefile</groupId>
@@ -19,39 +19,72 @@
 	<packaging>jar</packaging>
 
 	<properties>
-		<java.version>21</java.version>
-		<spring.boot.version>3.3.4</spring.boot.version>
+		<java.version>17</java.version>
 	</properties>
+
+	<repositories>
+		<repository>
+			<id>bouncycastle-repo</id>
+			<url>https://downloads.bouncycastle.org/fips-java</url>
+		</repository>
+	</repositories>
 
 
 	<dependencies>
-		<!-- ✅ Core Spring Boot Web starter -->
+		<!-- Spring Web -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-web</artifactId>
 		</dependency>
 
-		<!-- ✅ Lombok for reducing boilerplate -->
+		<!-- Jackson -->
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-databind</artifactId>
+		</dependency>
+
+		<!-- Lombok (optional) -->
 		<dependency>
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>
 			<optional>true</optional>
 		</dependency>
 
-		<!-- ✅ JSON handling -->
-		<dependency>
-			<groupId>com.fasterxml.jackson.core</groupId>
-			<artifactId>jackson-databind</artifactId>
-		</dependency>
-
-		<!-- ✅ BouncyCastle for advanced crypto -->
+		<!-- BouncyCastle provider (core) -->
 		<dependency>
 			<groupId>org.bouncycastle</groupId>
-			<artifactId>bcprov-jdk15on</artifactId>
-			<version>1.70</version>
+			<artifactId>bcprov-jdk18on</artifactId>
+			<version>1.79</version> <!-- pick a stable recent version available in Maven Central -->
 		</dependency>
 
-		<!-- ✅ Spring Boot Test (includes JUnit 5) -->
+		<!-- bcpkix (certs / utilities) -->
+		<dependency>
+			<groupId>org.bouncycastle</groupId>
+			<artifactId>bcpkix-jdk18on</artifactId>
+			<version>1.79</version>
+		</dependency>
+
+		<!-- (Optional) PQC extension if available on your repo.
+             If downloads.bouncycastle.org is unreachable, download the jar(s) manually and install locally
+             using the commands shown below and then enable this dependency.
+        -->
+		<!-- ✅ Post-Quantum Crypto (FIPS certified) -->
+		<dependency>
+			<groupId>org.bouncycastle</groupId>
+			<artifactId>bcpqc-fips</artifactId>
+			<version>2.0.0</version>
+		</dependency>
+
+
+		<!-- Jakarta annotations for @PostConstruct -->
+		<dependency>
+			<groupId>jakarta.annotation</groupId>
+			<artifactId>jakarta.annotation-api</artifactId>
+			<version>2.1.1</version>
+		</dependency>
+
+
+		<!-- Tests -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
@@ -61,19 +94,17 @@
 
 	<build>
 		<plugins>
+			<!-- Compiler plugin -->
 			<plugin>
-    <groupId>org.apache.maven.plugins</groupId>
-    <artifactId>maven-compiler-plugin</artifactId>
-    <version>3.11.0</version>
-    <configuration>
-        <source>21</source>
-        <target>21</target>
-        <encoding>UTF-8</encoding>
-    </configuration>
-</plugin>
-
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<version>3.11.0</version>
+				<configuration>
+					<source>${java.version}</source>
+					<target>${java.version}</target>
+					<encoding>UTF-8</encoding>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
-
-
 </project>

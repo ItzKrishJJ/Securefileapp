@@ -1,139 +1,116 @@
 package com.securefile.core_engine.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.securefile.core_engine.model.HybridContainer;
 import com.securefile.core_engine.model.Policy;
 import com.securefile.core_engine.util.KeystoreHelper;
+import com.securefile.core_engine.util.PQKeyStore;
+import jakarta.annotation.PostConstruct;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import jakarta.annotation.PostConstruct;
 import javax.crypto.Cipher;
-import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
-import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
-import java.security.KeyPair;
-import java.security.SecureRandom;
-import java.security.Security;
-import java.security.Signature;
-import java.security.spec.MGF1ParameterSpec;
-import javax.crypto.spec.OAEPParameterSpec;
-import javax.crypto.spec.PSource;
+import java.io.ByteArrayOutputStream;
+import java.security.*;
 import java.util.Base64;
 import java.util.List;
 
 @Service
 public class CryptoService {
 
-    private static final String AES_ALGO = "AES";
-    private static final int AES_KEY_BITS = 256;
-    private static final int GCM_IV_BYTES = 12;
-    private static final int GCM_TAG_BITS = 128;
-    private static final String AES_TRANSFORMATION = "AES/GCM/NoPadding";
-    private static final String RSA_TRANSFORMATION = "RSA/ECB/OAEPWithSHA-256AndMGF1Padding";
-
     private final KeystoreHelper keystoreHelper;
+    private final PQKeyStore pqKeyStore;
     private KeyPair rsaKeyPair;
-    private final ObjectMapper mapper = new ObjectMapper();
+
+    @Value("${pq.keystore.dir}")
+    private String pqKeysDir;
+
+    static {
+        Security.addProvider(new BouncyCastleProvider());
+    }
 
     public CryptoService(KeystoreHelper keystoreHelper) {
         this.keystoreHelper = keystoreHelper;
+        this.pqKeyStore = new PQKeyStore(java.nio.file.Path.of("D:/SecureFileApp/keystore"));
     }
 
     @PostConstruct
     public void init() throws Exception {
-        Security.addProvider(new BouncyCastleProvider());
-        rsaKeyPair = keystoreHelper.loadKeyPair();
-        System.out.println("✅ RSA KeyPair loaded from keystore.");
+        // ✅ Load RSA keypair from keystore instead of regenerating every time
+        try {
+            rsaKeyPair = keystoreHelper.loadKeyPair();
+        } catch (Exception ex) {
+            System.err.println("⚠️ Could not load keystore key, generating fallback RSA: " + ex.getMessage());
+            rsaKeyPair = pqKeyStore.loadOrCreateRSA("fallback_rsa", 2048, null);
+        }
     }
 
-    // -------------------- HYBRID ENCRYPT --------------------
-    public HybridContainer hybridEncrypt(byte[] plaintext, List<String> fileNames, Policy policy, String token) throws Exception {
-        KeyGenerator kg = KeyGenerator.getInstance(AES_ALGO);
-        kg.init(AES_KEY_BITS);
-        SecretKey aesKey = kg.generateKey();
+    /**
+     * Hybrid encrypt using XChaCha20 + RSA fallback.
+     */
+    public HybridContainer hybridEncrypt(byte[] payloadZip, List<String> filenames, Policy policy, String token) throws Exception {
+        byte[] symBytes = new byte[32];
+        new SecureRandom().nextBytes(symBytes);
+        SecretKey symKey = new SecretKeySpec(symBytes, "XCHACHA20");
 
-        byte[] iv = new byte[GCM_IV_BYTES];
-        SecureRandom sr = new SecureRandom();
-        sr.nextBytes(iv);
+        Cipher cipher = Cipher.getInstance("ChaCha20-Poly1305", "BC");
+        byte[] nonce = new byte[12];
+        new SecureRandom().nextBytes(nonce);
 
-        Cipher aesCipher = Cipher.getInstance(AES_TRANSFORMATION);
-        aesCipher.init(Cipher.ENCRYPT_MODE, aesKey, new GCMParameterSpec(GCM_TAG_BITS, iv));
-        byte[] cipherText = aesCipher.doFinal(plaintext);
+        cipher.init(Cipher.ENCRYPT_MODE, symKey, new javax.crypto.spec.IvParameterSpec(nonce));
+        byte[] ciphertext = cipher.doFinal(payloadZip);
 
-        Cipher rsaCipher = Cipher.getInstance(RSA_TRANSFORMATION);
-        OAEPParameterSpec oaepParams = new OAEPParameterSpec(
-                "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT);
-        rsaCipher.init(Cipher.ENCRYPT_MODE, rsaKeyPair.getPublic(), oaepParams);
-        byte[] wrappedKey = rsaCipher.doFinal(aesKey.getEncoded());
-
-        String signatureB64 = null;
-        if (policy == null || policy.isRequireSignature()) {
-            signatureB64 = sign(cipherText);
-        }
+        // RSA fallback (until PQC integrated)
+        byte[] encKey = rsaEncrypt(symBytes, rsaKeyPair.getPublic());
 
         HybridContainer container = new HybridContainer();
-        container.setEncryptedKey(Base64.getEncoder().encodeToString(wrappedKey));
-        container.setIv(Base64.getEncoder().encodeToString(iv));
-        container.setCipherText(Base64.getEncoder().encodeToString(cipherText));
-        container.setSignature(signatureB64);
-        container.setFileNames(fileNames);
-        container.setMetadata(policy == null ? null : mapper.writeValueAsString(policy));
-        container.setToken(token); // ✅ Attach token for verification
-
+        container.setCiphertext(Base64.getEncoder().encodeToString(ciphertext));
+        container.setEncSymmetricKey(Base64.getEncoder().encodeToString(encKey));
+        container.setNonce(Base64.getEncoder().encodeToString(nonce));
+        container.setFilenames(filenames);
+        container.setPolicy(policy);
+        container.setToken(token);
         return container;
     }
 
-    // -------------------- HYBRID DECRYPT --------------------
-    public byte[] hybridDecrypt(HybridContainer container, String providedToken) throws Exception {
-        if (container.getToken() == null || !container.getToken().equals(providedToken)) {
-            throw new SecurityException("❌ Invalid decryption token!");
-        }
+    public byte[] hybridDecrypt(HybridContainer container) throws Exception {
+        byte[] encKey = Base64.getDecoder().decode(container.getEncSymmetricKey());
+        byte[] sym = rsaDecrypt(encKey, rsaKeyPair.getPrivate());
+        SecretKey symKey = new SecretKeySpec(sym, "XCHACHA20");
 
-        byte[] wrappedKey = Base64.getDecoder().decode(container.getEncryptedKey());
-        byte[] iv = Base64.getDecoder().decode(container.getIv());
-        byte[] cipherText = Base64.getDecoder().decode(container.getCipherText());
+        byte[] nonce = Base64.getDecoder().decode(container.getNonce());
+        byte[] ct = Base64.getDecoder().decode(container.getCiphertext());
 
-        if (container.getSignature() != null) {
-            boolean ok = verify(cipherText, container.getSignature());
-            if (!ok) throw new SecurityException("Signature verification failed – possible tampering");
-        }
-
-        Cipher rsaCipher = Cipher.getInstance(RSA_TRANSFORMATION);
-        OAEPParameterSpec oaepParams = new OAEPParameterSpec(
-                "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT);
-        rsaCipher.init(Cipher.DECRYPT_MODE, rsaKeyPair.getPrivate(), oaepParams);
-        byte[] aesKeyBytes = rsaCipher.doFinal(wrappedKey);
-        SecretKeySpec aesKey = new SecretKeySpec(aesKeyBytes, AES_ALGO);
-
-        Cipher aesCipher = Cipher.getInstance(AES_TRANSFORMATION);
-        aesCipher.init(Cipher.DECRYPT_MODE, aesKey, new GCMParameterSpec(GCM_TAG_BITS, iv));
-        return aesCipher.doFinal(cipherText);
+        Cipher cipher = Cipher.getInstance("ChaCha20-Poly1305", "BC");
+        cipher.init(Cipher.DECRYPT_MODE, symKey, new javax.crypto.spec.IvParameterSpec(nonce));
+        return cipher.doFinal(ct);
     }
 
-    // -------------------- SIGN / VERIFY --------------------
-    public String sign(byte[] data) throws Exception {
-        Signature signer = Signature.getInstance("SHA256withRSA");
-        signer.initSign(rsaKeyPair.getPrivate());
-        signer.update(data);
-        return Base64.getEncoder().encodeToString(signer.sign());
+    private byte[] rsaEncrypt(byte[] data, PublicKey pub) throws Exception {
+        Cipher rsa = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+        rsa.init(Cipher.ENCRYPT_MODE, pub);
+        return rsa.doFinal(data);
     }
 
-    public boolean verify(byte[] data, String sigB64) throws Exception {
-        Signature verifier = Signature.getInstance("SHA256withRSA");
-        verifier.initVerify(rsaKeyPair.getPublic());
-        verifier.update(data);
-        byte[] sig = Base64.getDecoder().decode(sigB64);
-        return verifier.verify(sig);
+    private byte[] rsaDecrypt(byte[] enc, PrivateKey priv) throws Exception {
+        Cipher rsa = Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding");
+        rsa.init(Cipher.DECRYPT_MODE, priv);
+        return rsa.doFinal(enc);
     }
 
-    // -------------------- JSON HELPERS --------------------
     public byte[] serializeContainer(HybridContainer container) throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         return mapper.writeValueAsBytes(container);
     }
 
     public HybridContainer deserializeContainer(byte[] bytes) throws Exception {
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         return mapper.readValue(bytes, HybridContainer.class);
+    }
+
+    public boolean verifyToken(HybridContainer container, String token) {
+        return token != null && token.equals(container.getToken());
     }
 }
